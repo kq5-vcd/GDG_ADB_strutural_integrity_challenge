@@ -11,8 +11,8 @@ from collections import defaultdict
 
 warnings.filterwarnings("ignore")
 
-BASE = "/sessions/bold-magical-dirac/mnt/GDG-Hackaton/Structural.integrity.Seonsor.Board.data/Sensor Board Update Initial Test"
-OUT = "/sessions/bold-magical-dirac/mnt/GDG-Hackaton/classifier_results"
+BASE = "../Structural.integrity.Seonsor.Board.data/Sensor Board Update Initial Test"
+OUT = "classifier_results"
 os.makedirs(OUT, exist_ok=True)
 
 FS = 27000
@@ -279,140 +279,126 @@ with open(f"{OUT}/feature_names.json", "w") as f:
     json.dump(feature_names, f, indent=2)
 
 # =============================================================================
-# 3. CLASSIFICATION WITH PROPER SPLITS
+# 3. CLASSIFICATION WITH RIGOROUS EVALUATION
 # =============================================================================
 print("\n" + "=" * 60)
 print("STEP 3: Classification with rigorous evaluation")
 print("=" * 60)
 
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedKFold
 import json
 
-# --- 3A. Leave-Excitation-Pattern-Out Cross-Validation ---
-print("\n--- 3A: Leave-Excitation-Pattern-Out CV ---")
-# This tests: can the classifier generalize to unseen excitation patterns?
-# This is the HARDEST and most honest test.
+def run_cv(X, y, groups, cv_splitter, model_name, clf):
+    scores = []
+    y_true_all, y_pred_all = [], []
+    for fold, (train_idx, test_idx) in enumerate(cv_splitter.split(X, y, groups=groups)):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        
+        scaler = StandardScaler()
+        X_train_s = scaler.fit_transform(X_train)
+        X_test_s = scaler.transform(X_test)
+        
+        clf.fit(X_train_s, y_train)
+        y_pred = clf.predict(X_test_s)
+        
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average="macro")
+        scores.append({"fold": fold, "accuracy": acc, "macro_f1": f1})
+        y_true_all.extend(y_test)
+        y_pred_all.extend(y_pred)
+    
+    mean_acc = np.mean([s["accuracy"] for s in scores])
+    mean_f1 = np.mean([s["macro_f1"] for s in scores])
+    print(f"  {model_name}: Acc={mean_acc:.3f}, F1={mean_f1:.3f}")
+    return scores, y_true_all, y_pred_all
 
+# --- 3A. Naive Random Split (Baseline) ---
+print("\n--- 3A: Naive Random Split (Leakage Baseline) ---")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores_naive, yt_naive, yp_naive = run_cv(
+    X, y, None, skf, "RF (Naive)", 
+    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+)
+
+# --- 3B. Leave-Physical-Test-Out CV ---
+print("\n--- 3B: Leave-Physical-Test-Out (Replicate Split) ---")
+test_ids = np.array([m[1] for m in all_meta_info])
+gkf_test = GroupKFold(n_splits=5)
+scores_lpto, yt_lpto, yp_lpto = run_cv(
+    X, y, test_ids, gkf_test, "RF (LPTO)",
+    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+)
+
+# --- 3C. Leave-Sensor-Board-Out CV ---
+print("\n--- 3C: Leave-Sensor-Board-Out CV ---")
+boards = np.array([m[2] for m in all_meta_info])
+gkf_board = GroupKFold(n_splits=5)
+scores_lsbo, yt_lsbo, yp_lsbo = run_cv(
+    X, y, boards, gkf_board, "RF (LSBO)",
+    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+)
+
+# --- 3D. Leave-Excitation-Pattern-Out CV ---
+print("\n--- 3D: Leave-Excitation-Pattern-Out (LEPO) CV ---")
 patterns = np.array([m[3] for m in all_meta_info])
-unique_patterns = np.unique(patterns)
-print(f"  {len(unique_patterns)} unique excitation patterns")
-
-# Assign pattern group IDs
-pattern_to_id = {p: i for i, p in enumerate(unique_patterns)}
-pattern_groups = np.array([pattern_to_id[p] for p in patterns])
-
-# GroupKFold with 6 folds (grouping by excitation pattern families)
-# Group patterns into 6 families by primary frequency band
 def get_pattern_family(pat):
-    """Group excitation patterns by primary sweep band."""
-    if pat.startswith("50-100Hz") or pat.startswith("-Hz@"):
-        return 0
-    elif pat.startswith("50-200Hz"):
-        return 1
-    elif pat.startswith("50-1000Hz"):
-        return 2
-    elif pat.startswith("50-4000Hz"):
-        return 3
-    elif pat.startswith("100-200Hz"):
-        return 4
-    elif pat.startswith("100-1000Hz"):
-        return 5
-    else:
-        return 6
+    if pat.startswith("50-100Hz") or pat.startswith("-Hz@"): return 0
+    elif pat.startswith("50-200Hz"): return 1
+    elif pat.startswith("50-1000Hz"): return 2
+    elif pat.startswith("50-4000Hz"): return 3
+    elif pat.startswith("100-200Hz"): return 4
+    elif pat.startswith("100-1000Hz"): return 5
+    else: return 6
 
 pattern_families = np.array([get_pattern_family(p) for p in patterns])
+gkf_pattern = GroupKFold(n_splits=6)
+scores_lepo, yt_lepo, yp_lepo = run_cv(
+    X, y, pattern_families, gkf_pattern, "RF (LEPO)",
+    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+)
 
-gkf = GroupKFold(n_splits=6)
-lepo_scores = []
-lepo_reports = []
-all_y_true = []
-all_y_pred = []
+# --- 3E. Linear Model Comparison ---
+print("\n--- 3E: Linear Model Comparison (LEPO) ---")
+# Using LogisticRegression for standard linear baseline on classification
+scores_lr_lepo, yt_lr, yp_lr = run_cv(
+    X, y, pattern_families, gkf_pattern, "LogReg (LEPO)",
+    LogisticRegression(max_iter=2000, random_state=42)
+)
 
-for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups=pattern_families)):
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
-    
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
-    
-    clf = RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
-    clf.fit(X_train_s, y_train)
-    y_pred = clf.predict(X_test_s)
-    
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average="macro")
-    lepo_scores.append({"fold": fold, "accuracy": acc, "macro_f1": f1})
-    
-    test_patterns = set(patterns[test_idx])
-    print(f"  Fold {fold}: acc={acc:.3f}, F1={f1:.3f} | test patterns: {len(test_patterns)}")
-    
-    all_y_true.extend(y_test)
-    all_y_pred.extend(y_pred)
+# --- 3F. Strict Combinatorial Holdout ---
+print("\n--- 3F: Strict Combinatorial Holdout ---")
+unique_boards = np.unique(boards)
+unique_patterns = np.unique(patterns)
 
-print(f"\n  LEPO Mean: acc={np.mean([s['accuracy'] for s in lepo_scores]):.3f} +/- {np.std([s['accuracy'] for s in lepo_scores]):.3f}")
-print(f"  LEPO Mean: F1={np.mean([s['macro_f1'] for s in lepo_scores]):.3f} +/- {np.std([s['macro_f1'] for s in lepo_scores]):.3f}")
+# Hold out the last 2 boards and the '50-4000Hz' pattern completely
+holdout_boards = unique_boards[-2:]
+holdout_pattern = "50-4000Hz"
 
-print("\n  Overall Classification Report (LEPO):")
-print(classification_report(all_y_true, all_y_pred, target_names=LABEL_NAMES))
+train_mask = ~(np.isin(boards, holdout_boards) | (patterns == holdout_pattern))
+test_mask = np.isin(boards, holdout_boards) & (patterns == holdout_pattern)
 
-cm_lepo = confusion_matrix(all_y_true, all_y_pred)
-print("  Confusion Matrix (LEPO):")
-print(cm_lepo)
+X_train, X_test = X[train_mask], X[test_mask]
+y_train, y_test = y[train_mask], y[test_mask]
 
-# --- 3B. Leave-Replicate-Out CV ---
-print("\n--- 3B: Leave-Replicate-Out CV ---")
-# Group by replicate number (last digit of test ID for standard tests)
-replicate_groups = []
-for m in all_meta_info:
-    tid = m[1]
-    if len(tid) >= 5:
-        rep = int(tid[-1])  # last digit is replicate number (1-5)
-    else:
-        rep = 0  # special tests
-    replicate_groups.append(rep)
-replicate_groups = np.array(replicate_groups)
+scaler_strict = StandardScaler()
+X_train_s = scaler_strict.fit_transform(X_train)
+X_test_s = scaler_strict.transform(X_test)
 
-gkf_rep = GroupKFold(n_splits=5)
-lro_scores = []
-lro_y_true = []
-lro_y_pred = []
+clf_strict = RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+clf_strict.fit(X_train_s, y_train)
+y_pred_strict = clf_strict.predict(X_test_s)
 
-for fold, (train_idx, test_idx) in enumerate(gkf_rep.split(X, y, groups=replicate_groups)):
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
-    
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
-    
-    clf = RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
-    clf.fit(X_train_s, y_train)
-    y_pred = clf.predict(X_test_s)
-    
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average="macro")
-    lro_scores.append({"fold": fold, "accuracy": acc, "macro_f1": f1})
-    print(f"  Fold {fold}: acc={acc:.3f}, F1={f1:.3f}")
-    
-    lro_y_true.extend(y_test)
-    lro_y_pred.extend(y_pred)
+acc_strict = accuracy_score(y_test, y_pred_strict)
+f1_strict = f1_score(y_test, y_pred_strict, average="macro")
+print(f"  RF (Strict Holdout): Acc={acc_strict:.3f}, F1={f1_strict:.3f}")
 
-print(f"\n  LRO Mean: acc={np.mean([s['accuracy'] for s in lro_scores]):.3f} +/- {np.std([s['accuracy'] for s in lro_scores]):.3f}")
-print(f"  LRO Mean: F1={np.mean([s['macro_f1'] for s in lro_scores]):.3f} +/- {np.std([s['macro_f1'] for s in lro_scores]):.3f}")
-
-print("\n  Overall Classification Report (LRO):")
-print(classification_report(lro_y_true, lro_y_pred, target_names=LABEL_NAMES))
-
-cm_lro = confusion_matrix(lro_y_true, lro_y_pred)
-print("  Confusion Matrix (LRO):")
-print(cm_lro)
-
-# --- 3C. Train final model on all data for feature importance ---
-print("\n--- 3C: Feature Importance Analysis ---")
+# --- 3G. Final Feature Importance Analysis ---
+print("\n--- 3G: Feature Importance Analysis ---")
 scaler_final = StandardScaler()
 X_scaled = scaler_final.fit_transform(X)
 
@@ -422,125 +408,58 @@ clf_final.fit(X_scaled, y)
 importances = clf_final.feature_importances_
 sorted_idx = np.argsort(importances)[::-1]
 
-print("\n  Top 25 most important features:")
-for i in range(min(25, len(feature_names))):
+print("\n  Top 15 most important features:")
+for i in range(min(15, len(feature_names))):
     idx = sorted_idx[i]
     print(f"    {i+1:>2}. {feature_names[idx]:<30} {importances[idx]:.4f}")
 
-# --- 3D. Gradient Boosting Comparison ---
-print("\n--- 3D: Gradient Boosting Comparison ---")
-gb_scores = []
-gb_y_true = []
-gb_y_pred = []
-
-for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups=pattern_families)):
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
-    
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
-    
-    clf_gb = GradientBoostingClassifier(n_estimators=200, max_depth=5, learning_rate=0.1, random_state=42)
-    clf_gb.fit(X_train_s, y_train)
-    y_pred = clf_gb.predict(X_test_s)
-    
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average="macro")
-    gb_scores.append({"fold": fold, "accuracy": acc, "macro_f1": f1})
-    gb_y_true.extend(y_test)
-    gb_y_pred.extend(y_pred)
-
-print(f"  GB LEPO Mean: acc={np.mean([s['accuracy'] for s in gb_scores]):.3f} +/- {np.std([s['accuracy'] for s in gb_scores]):.3f}")
-print(f"  GB LEPO Mean: F1={np.mean([s['macro_f1'] for s in gb_scores]):.3f} +/- {np.std([s['macro_f1'] for s in gb_scores]):.3f}")
-
-print("\n  GB Classification Report (LEPO):")
-print(classification_report(gb_y_true, gb_y_pred, target_names=LABEL_NAMES))
-
-cm_gb = confusion_matrix(gb_y_true, gb_y_pred)
 
 # =============================================================================
-# 4. PER-EXCITATION PATTERN ANALYSIS
+# 4. SAVE RESULTS & PLOTS
 # =============================================================================
 print("\n" + "=" * 60)
-print("STEP 4: Per-excitation pattern discriminative analysis")
-print("=" * 60)
-
-# Train on all data, then look at per-pattern accuracy
-clf_final.fit(X_scaled, y)  # already done above
-y_pred_all = clf_final.predict(X_scaled)
-
-pattern_accuracy = defaultdict(lambda: {"correct": 0, "total": 0})
-for i, (run, tid, board, pat) in enumerate(all_meta_info):
-    pattern_accuracy[pat]["total"] += 1
-    if y_pred_all[i] == y[i]:
-        pattern_accuracy[pat]["correct"] += 1
-
-print("\n  Per-excitation pattern accuracy (training set, for signal analysis):")
-print(f"  {'Pattern':<50} {'Acc':>6} {'N':>6}")
-print("  " + "-" * 65)
-for pat in sorted(pattern_accuracy.keys()):
-    d = pattern_accuracy[pat]
-    acc = d["correct"] / d["total"]
-    print(f"  {pat:<50} {acc:>6.1%} {d['total']:>6}")
-
-# =============================================================================
-# 5. PER-BOARD ANALYSIS
-# =============================================================================
-print("\n" + "=" * 60)
-print("STEP 5: Per-board discriminative analysis")
-print("=" * 60)
-
-board_accuracy = defaultdict(lambda: {"correct": 0, "total": 0})
-for i, (run, tid, board, pat) in enumerate(all_meta_info):
-    board_accuracy[board]["total"] += 1
-    if y_pred_all[i] == y[i]:
-        board_accuracy[board]["correct"] += 1
-
-print(f"\n  {'Board':<15} {'Acc':>6} {'N':>6}")
-print("  " + "-" * 30)
-for board in sorted(board_accuracy.keys()):
-    d = board_accuracy[board]
-    acc = d["correct"] / d["total"]
-    print(f"  {board:<15} {acc:>6.1%} {d['total']:>6}")
-
-# =============================================================================
-# 6. SAVE RESULTS & PLOTS
-# =============================================================================
-print("\n" + "=" * 60)
-print("STEP 6: Saving results and plots")
+print("STEP 4: Saving results and plots")
 print("=" * 60)
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Plot 1: Confusion matrices
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# Plot 1: Model comparison bar chart across all splits
+fig, ax = plt.subplots(figsize=(10, 6))
+model_names = ["Naive (Random)", "LPTO (Test)", "LSBO (Board)", "LEPO (Pattern)", "LogReg (LEPO)", "RF (Strict Holdout)"]
+accs = [
+    np.mean([s["accuracy"] for s in scores_naive]),
+    np.mean([s["accuracy"] for s in scores_lpto]),
+    np.mean([s["accuracy"] for s in scores_lsbo]),
+    np.mean([s["accuracy"] for s in scores_lepo]),
+    np.mean([s["accuracy"] for s in scores_lr_lepo]),
+    acc_strict
+]
+f1s = [
+    np.mean([s["macro_f1"] for s in scores_naive]),
+    np.mean([s["macro_f1"] for s in scores_lpto]),
+    np.mean([s["macro_f1"] for s in scores_lsbo]),
+    np.mean([s["macro_f1"] for s in scores_lepo]),
+    np.mean([s["macro_f1"] for s in scores_lr_lepo])
+]
 
-for ax, cm, title in zip(axes, 
-    [cm_lepo, cm_lro, cm_gb],
-    ["Random Forest (Leave-Excitation-Out)", "Random Forest (Leave-Replicate-Out)", "Gradient Boosting (Leave-Excitation-Out)"]):
-    
-    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-    ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.set_xticks([0, 1, 2])
-    ax.set_yticks([0, 1, 2])
-    ax.set_xticklabels(LABEL_NAMES, rotation=30, ha="right", fontsize=9)
-    ax.set_yticklabels(LABEL_NAMES, fontsize=9)
-    ax.set_ylabel("True")
-    ax.set_xlabel("Predicted")
-    
-    for i in range(3):
-        for j in range(3):
-            color = "white" if cm[i, j] > cm.max() / 2 else "black"
-            ax.text(j, i, str(cm[i, j]), ha="center", va="center", color=color, fontsize=12)
-
+x = np.arange(len(model_names))
+width = 0.35
+ax.bar(x - width/2, accs, width, label="Accuracy", color="#4A90D9", alpha=0.8)
+ax.bar(x + width/2, f1s, width, label="Macro F1", color="#E8854A", alpha=0.8)
+ax.set_xticks(x)
+ax.set_xticklabels(model_names, rotation=15)
+ax.set_ylabel("Score")
+ax.set_ylim(0, 1.05)
+ax.legend()
+ax.grid(True, alpha=0.3, axis="y")
+ax.set_title("Model Evaluation Across Validation Strategies", fontsize=13, fontweight="bold")
 plt.tight_layout()
-plt.savefig(f"{OUT}/confusion_matrices.png", dpi=150, bbox_inches="tight")
+plt.savefig(f"{OUT}/split_comparison.png", dpi=150, bbox_inches="tight")
 plt.close()
 
-# Plot 2: Feature importance (top 20)
+# Plot 2: Feature importance
 fig, ax = plt.subplots(figsize=(10, 8))
 top_n = 20
 top_idx = sorted_idx[:top_n][::-1]
@@ -554,69 +473,29 @@ plt.tight_layout()
 plt.savefig(f"{OUT}/feature_importance.png", dpi=150, bbox_inches="tight")
 plt.close()
 
-# Plot 3: Model comparison bar chart
-fig, ax = plt.subplots(figsize=(8, 5))
-models = ["RF (LEPO)", "RF (LRO)", "GB (LEPO)"]
-accs = [
-    np.mean([s["accuracy"] for s in lepo_scores]),
-    np.mean([s["accuracy"] for s in lro_scores]),
-    np.mean([s["accuracy"] for s in gb_scores]),
-]
-f1s = [
-    np.mean([s["macro_f1"] for s in lepo_scores]),
-    np.mean([s["macro_f1"] for s in lro_scores]),
-    np.mean([s["macro_f1"] for s in gb_scores]),
-]
-acc_stds = [
-    np.std([s["accuracy"] for s in lepo_scores]),
-    np.std([s["accuracy"] for s in lro_scores]),
-    np.std([s["accuracy"] for s in gb_scores]),
-]
-
-x = np.arange(len(models))
-width = 0.35
-ax.bar(x - width/2, accs, width, yerr=acc_stds, label="Accuracy", color="#4A90D9", alpha=0.8, capsize=5)
-ax.bar(x + width/2, f1s, width, label="Macro F1", color="#E8854A", alpha=0.8, capsize=5)
-ax.set_xticks(x)
-ax.set_xticklabels(models)
-ax.set_ylabel("Score")
-ax.set_ylim(0, 1.05)
-ax.legend()
-ax.grid(True, alpha=0.3, axis="y")
-ax.set_title("Model Comparison Across Evaluation Strategies", fontsize=13, fontweight="bold")
-plt.tight_layout()
-plt.savefig(f"{OUT}/model_comparison.png", dpi=150, bbox_inches="tight")
-plt.close()
-
 # Save numeric results
 results = {
-    "rf_lepo": {"mean_acc": float(np.mean([s["accuracy"] for s in lepo_scores])),
-                "std_acc": float(np.std([s["accuracy"] for s in lepo_scores])),
-                "mean_f1": float(np.mean([s["macro_f1"] for s in lepo_scores]))},
-    "rf_lro": {"mean_acc": float(np.mean([s["accuracy"] for s in lro_scores])),
-               "std_acc": float(np.std([s["accuracy"] for s in lro_scores])),
-               "mean_f1": float(np.mean([s["macro_f1"] for s in lro_scores]))},
-    "gb_lepo": {"mean_acc": float(np.mean([s["accuracy"] for s in gb_scores])),
-                "std_acc": float(np.std([s["accuracy"] for s in gb_scores])),
-                "mean_f1": float(np.mean([s["macro_f1"] for s in gb_scores]))},
+    "rf_naive": {"mean_acc": accs[0], "mean_f1": f1s[0]},
+    "rf_lpto": {"mean_acc": accs[1], "mean_f1": f1s[1]},
+    "rf_lsbo": {"mean_acc": accs[2], "mean_f1": f1s[2]},
+    "rf_lepo": {"mean_acc": accs[3], "mean_f1": f1s[3]},
+    "logreg_lepo": {"mean_acc": accs[4], "mean_f1": f1s[4]},
+    "rf_strict_holdout": {"acc": acc_strict, "f1": f1_strict},
     "n_features": len(feature_names),
     "n_samples": len(all_features),
-    "class_distribution": {"30NM": all_labels.count(0), "Loose": all_labels.count(1), "Mix-45": all_labels.count(2)},
+    "class_distribution": {"30NM": all_labels.count(0), "Loose": all_labels.count(1), "Mix-45": all_labels.count(2)}
 }
 
 with open(f"{OUT}/results.json", "w") as f:
     json.dump(results, f, indent=2)
 
-# Save feature matrix for further experiments
 np.save(f"{OUT}/X_features.npy", X)
 np.save(f"{OUT}/y_labels.npy", y)
 
 print(f"\n  All results saved to: {OUT}/")
-print(f"  - confusion_matrices.png")
+print(f"  - split_comparison.png")
 print(f"  - feature_importance.png")
-print(f"  - model_comparison.png")
 print(f"  - results.json")
-print(f"  - feature_names.json")
 print(f"  - X_features.npy, y_labels.npy")
 
 print("\n" + "=" * 60)
