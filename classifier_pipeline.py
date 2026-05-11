@@ -71,7 +71,7 @@ def load_signal(run, test_id, board):
     path = f"{BASE}/{run}/{test_id}/{board}"
     if not os.path.isdir(path):
         return None
-    files = [f for f in os.listdir(path) if f.endswith(".csv") and not f.endswith("_i.csv")]
+    files = [f for f in os.listdir(path) if f.endswith(".csv") ]
     if not files:
         return None
     fpath = os.path.join(path, sorted(files)[0])
