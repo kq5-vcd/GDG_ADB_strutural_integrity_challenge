@@ -322,7 +322,7 @@ print("\n--- 3A: Naive Random Split (Leakage Baseline) ---")
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 scores_naive, yt_naive, yp_naive = run_cv(
     X, y, None, skf, "RF (Naive)", 
-    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+    RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=5, random_state=42, n_jobs=-1)
 )
 
 # --- 3B. Leave-Physical-Test-Out CV ---
@@ -331,7 +331,7 @@ test_ids = np.array([m[1] for m in all_meta_info])
 gkf_test = GroupKFold(n_splits=5)
 scores_lpto, yt_lpto, yp_lpto = run_cv(
     X, y, test_ids, gkf_test, "RF (LPTO)",
-    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+    RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=5, random_state=42, n_jobs=-1)
 )
 
 # --- 3C. Leave-Sensor-Board-Out CV ---
@@ -340,7 +340,7 @@ boards = np.array([m[2] for m in all_meta_info])
 gkf_board = GroupKFold(n_splits=5)
 scores_lsbo, yt_lsbo, yp_lsbo = run_cv(
     X, y, boards, gkf_board, "RF (LSBO)",
-    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+    RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=5, random_state=42, n_jobs=-1)
 )
 
 # --- 3D. Leave-Excitation-Pattern-Out CV ---
@@ -359,7 +359,7 @@ pattern_families = np.array([get_pattern_family(p) for p in patterns])
 gkf_pattern = GroupKFold(n_splits=6)
 scores_lepo, yt_lepo, yp_lepo = run_cv(
     X, y, pattern_families, gkf_pattern, "RF (LEPO)",
-    RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+    RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=5, random_state=42, n_jobs=-1)
 )
 
 # --- 3E. Linear Model Comparison ---
@@ -367,7 +367,7 @@ print("\n--- 3E: Linear Model Comparison (LEPO) ---")
 # Using LogisticRegression for standard linear baseline on classification
 scores_lr_lepo, yt_lr, yp_lr = run_cv(
     X, y, pattern_families, gkf_pattern, "LogReg (LEPO)",
-    LogisticRegression(max_iter=2000, random_state=42)
+    LogisticRegression(max_iter=1000, random_state=42)
 )
 
 # --- 3F. Strict Combinatorial Holdout ---
@@ -389,7 +389,7 @@ scaler_strict = StandardScaler()
 X_train_s = scaler_strict.fit_transform(X_train)
 X_test_s = scaler_strict.transform(X_test)
 
-clf_strict = RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_leaf=5, random_state=42, n_jobs=-1)
+clf_strict = RandomForestClassifier(n_estimators=200, max_depth=5, min_samples_leaf=5, random_state=42, n_jobs=-1)
 clf_strict.fit(X_train_s, y_train)
 y_pred_strict = clf_strict.predict(X_test_s)
 
@@ -441,7 +441,8 @@ f1s = [
     np.mean([s["macro_f1"] for s in scores_lpto]),
     np.mean([s["macro_f1"] for s in scores_lsbo]),
     np.mean([s["macro_f1"] for s in scores_lepo]),
-    np.mean([s["macro_f1"] for s in scores_lr_lepo])
+    np.mean([s["macro_f1"] for s in scores_lr_lepo]),
+    f1_strict
 ]
 
 x = np.arange(len(model_names))
